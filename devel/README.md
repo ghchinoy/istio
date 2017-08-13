@@ -229,10 +229,10 @@ Using Mixer as an example:
 
 ```shell
 cd $(ISTIO)/mixer
-bazel build ...
+bazel build //...
 ```
 
-This figures out what it needs to do and does not need any input from you.
+This build command figures out what it needs to do and does not need any input from you.
 
 ### Setup bazel and go links
 
@@ -257,7 +257,7 @@ bazel clean
 You can run all the available tests with:
 
 ```shell
-bazel test ...
+bazel test //...
 ```
 ### Getting coverage numbers
 
@@ -283,7 +283,7 @@ You can run all the linters we require on your local repo by going to the top of
 ```shell
 make lint
 # To run only on your local changes
-LAST_GOOD_GITSHA=HEAD bin/linters.sh
+bin/linters.sh -s HEAD^
 ```
 
 ### Race detection tests
@@ -350,7 +350,7 @@ For local development (building from source and running the major components) on
 
 Assuming you did (once):
 1. [Install bazel](https://bazel.build/versions/master/docs/install-ubuntu.html), note that as of this writing Bazel needs the `openjdk-8-jdk` VM (you might need to uninstall or get out of the way the `ibm-java80-jdk` that comes by default with GCE for instance)
-2. Install required packages: `sudo apt-get install make openjdk-8-jdk libtool m4 autoconf uuid-dev`
+2. Install required packages: `sudo apt-get install make openjdk-8-jdk libtool m4 autoconf uuid-dev cmake`
 3. Get the source trees
    ```bash
    mkdir github
@@ -358,13 +358,11 @@ Assuming you did (once):
    git clone https://github.com/istio/proxy.git
    git clone https://github.com/istio/mixer.git
    git clone https://github.com/istio/istio.git
-   # if you want to do load tests:
-   git clone https://github.com/wg/wrk.git
    ```
 4. You can then use
    - [update_all](update_all) : script to build from source
    - [setup_run](setup_run) : run locally
-   - [fortio](fortio/) (φορτίο) : load testing
+   - [fortio](fortio/) (φορτίο) : load testing and minimal echo http and grpc server
    - Also found in this directory: [rules.yml](rules.yml) : the version of  mixer/testdata/configroot/scopes/global/subjects/global/rules.yml that works locally and [quota.yml](quota.yml) a very simple 1 qps quota example used below.
    - And an unrelated tool to aggregate [GitHub Contributions](githubContrib/) statistics.
 5. And run things like
@@ -376,7 +374,7 @@ Assuming you did (once):
    # Add a rule locally (simply drop the file or exercise the API:)
    curl -v  http://localhost:9094/api/v1/scopes/global/subjects/foo.svc.cluster.local/rules --data-binary @quota.yaml -X PUT -H "Content-Type: application/yaml"
    # Test under some load:
-   wrk http://localhost:9090/echo
+   fortio load -qps 2000 http://localhost:9090/echo
 
    ```
    Note that this is done for you by [setup_run](setup_run) but to use the correct go environment:

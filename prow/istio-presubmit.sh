@@ -26,23 +26,17 @@ set -u
 # Print commands
 set -x
 
-E2E_ARGS=()
-
 if [ "${CI}" == 'bootstrap' ]; then
   # Test harness will checkout code to directory $GOPATH/src/github.com/istio/istio
   # but we depend on being at path $GOPATH/src/istio.io/istio for imports
-  mkdir -p ${GOPATH}/src/istio.io
-  ln -s ${GOPATH}/src/github.com/istio/istio ${GOPATH}/src/istio.io
-  cd ${GOPATH}/src/istio.io/istio/
+  ln -sf ${GOPATH}/src/github.com/istio ${GOPATH}/src/istio.io
+  cd ${GOPATH}/src/istio.io/istio
 
-  # bootsrap upload all artifacts in _artifacts to the log bucket.
-  ARTIFACTS_DIR="${GOPATH}/src/istio.io/istio/_artifacts"
-  E2E_ARGS+=(--test_logs_path="${ARTIFACTS_DIR}")
-
-  # We are running e2e tests in a specific cluster.
-  # Using volume mount from istio-presubmit job's pod spec
-  mkdir -p ${HOME}/.kube
-  ln -s /etc/e2e-testing-kubeconfig/e2e-testing-kubeconfig ${HOME}/.kube/config
+  # Use the provided pull head sha, from prow.
+  GIT_SHA="${PULL_PULL_SHA}"
+else
+  # Use the current commit.
+  GIT_SHA="$(git rev-parse --verify HEAD)"
 fi
 
 echo 'Running Linters'
@@ -51,6 +45,8 @@ echo 'Running Linters'
 echo 'Running Unit Tests'
 bazel test //...
 
-echo 'Running Integration Tests'
-./tests/e2e.sh ${E2E_ARGS[@]}
+echo 'Pushing Images'
+(cd devel/fortio && make authorize all TAG="${GIT_SHA}")
 
+echo 'Running Integration Tests'
+./prow/e2e.sh

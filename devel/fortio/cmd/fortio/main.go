@@ -17,39 +17,12 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
-	"net/http"
 	"os"
-	"sort"
+	"runtime"
 
 	"istio.io/istio/devel/fortio"
+	"istio.io/istio/devel/fortio/fortiogrpc"
 )
-
-type threadStats struct {
-	retCodes map[int]int64
-	sizes    *fortio.Histogram
-}
-
-// Used globally / in test() TODO: change periodic.go to carry caller defined context
-var (
-	url           string
-	stats         []threadStats
-	verbosityFlag = flag.Int("v", 0, "Verbosity level (0 is quiet)")
-)
-
-// Main call being run at the target QPS
-func test(t int) {
-	if *verbosityFlag > 1 {
-		log.Printf("Calling in %d", t)
-	}
-	code, body := fortio.FetchURL(url)
-	size := len(body)
-	if *verbosityFlag > 1 {
-		log.Printf("Got in %3d sz %d", code, size)
-	}
-	stats[t].retCodes[code]++
-	stats[t].sizes.Record(float64(size))
-}
 
 // -- Support for multiple instances of -H flag on cmd line:
 type flagList struct {
@@ -66,91 +39,112 @@ func (f *flagList) Set(value string) error {
 // -- end of functions for -H support
 
 // Prints usage
-func usage() {
-	fmt.Fprintf(os.Stderr, "Φορτίο %s usage:\n\n%s [flags] url\n", fortio.Version, os.Args[0]) // nolint(gas)
+func usage(msgs ...interface{}) {
+	fmt.Fprintf(os.Stderr, "Φορτίο %s usage:\n\t%s command [flags] target\n%s\n%s\n%s\n",
+		fortio.Version,
+		os.Args[0],
+		"where command is one of: load (load testing), server (starts grpc ping and http echo servers), grcping (grpc client)",
+		"where target is a url (http load tests) or host:port (grpc health test)",
+		"and flags are:") // nolint(gas)
 	flag.PrintDefaults()
+	fmt.Fprint(os.Stderr, msgs...)
+	os.Stderr.WriteString("\n") // nolint(gas)
 	os.Exit(1)
 }
 
-func main() {
-	var (
-		defaults = &fortio.DefaultRunnerOptions
-		// Very small default so people just trying with random URLs don't affect the target
-		qpsFlag         = flag.Float64("qps", 8.0, "Queries Per Seconds or 0 for no wait")
-		numThreadsFlag  = flag.Int("c", defaults.NumThreads, "Number of connections/goroutine/threads")
-		durationFlag    = flag.Duration("t", defaults.Duration, "How long to run the test")
-		percentilesFlag = flag.String("p", "50,75,99,99.9", "List of pXX to calculate")
-		resolutionFlag  = flag.Float64("r", defaults.Resolution, "Resolution of the histogram lowest buckets in seconds")
-		headersFlags    flagList
-	)
-	flag.Var(&headersFlags, "H", "Additional Header(s)")
-	flag.Parse()
+var (
+	defaults = &fortio.DefaultRunnerOptions
+	// Very small default so people just trying with random URLs don't affect the target
+	qpsFlag         = flag.Float64("qps", 8.0, "Queries Per Seconds or 0 for no wait")
+	numThreadsFlag  = flag.Int("c", defaults.NumThreads, "Number of connections/goroutine/threads")
+	durationFlag    = flag.Duration("t", defaults.Duration, "How long to run the test")
+	percentilesFlag = flag.String("p", "50,75,99,99.9", "List of pXX to calculate")
+	resolutionFlag  = flag.Float64("r", defaults.Resolution, "Resolution of the histogram lowest buckets in seconds")
+	compressionFlag = flag.Bool("compression", false, "Enable http compression")
+	goMaxProcsFlag  = flag.Int("gomaxprocs", 0, "Setting for runtime.GOMAXPROCS, <1 doesn't change the default")
+	profileFlag     = flag.String("profile", "", "write .cpu and .mem profiles to file")
+	keepAliveFlag   = flag.Bool("keepalive", true, "Keep connection alive (only for fast http 1.1)")
+	stdClientFlag   = flag.Bool("stdclient", false, "Use the slower net/http standard client (works for TLS)")
+	http10Flag      = flag.Bool("http1.0", false, "Use http1.0 (instead of http 1.1)")
+	grpcFlag        = flag.Bool("grpc", false, "Use GRPC (health check) for load testing")
+	echoPortFlag    = flag.Int("http-port", 8080, "http echo server port")
+	grpcPortFlag    = flag.Int("grpc-port", 8079, "grpc port")
 
-	verbosity := *verbosityFlag
-	fortio.Verbosity = verbosity
-	pList, err := fortio.ParsePercentiles(*percentilesFlag)
+	headersFlags flagList
+	percList     []float64
+	err          error
+)
+
+func main() {
+	flag.Var(&headersFlags, "H", "Additional Header(s)")
+	flag.IntVar(&fortio.BufferSizeKb, "httpbufferkb", fortio.BufferSizeKb, "Size of the buffer (max data size) for the optimized http client in kbytes")
+	flag.BoolVar(&fortio.CheckConnectionClosedHeader, "httpccch", fortio.CheckConnectionClosedHeader, "Check for Connection: Close Header")
+	if len(os.Args) < 2 {
+		usage("Error: need at least 1 command parameter")
+	}
+	command := os.Args[1]
+	os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+	flag.Parse()
+	percList, err = fortio.ParsePercentiles(*percentilesFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to extract percentiles from -p: %v\n", err) // nolint(gas)
-		usage()
+		usage("Unable to extract percentiles from -p: ", err)
 	}
+
+	switch command {
+	case "load":
+		fortioLoad()
+	case "server":
+		go fortio.EchoServer(*echoPortFlag)
+		pingServer(*grpcPortFlag)
+	case "grpcping":
+		grpcClient()
+	default:
+		usage("Error: unknown command ", command)
+	}
+
+}
+
+func fortioLoad() {
 	if len(flag.Args()) != 1 {
-		usage()
+		usage("Error: fortio load needs a url or destination")
 	}
-	url = flag.Arg(0)
-	fmt.Printf("Fortio running at %g queries per second for %v: %s\n", *qpsFlag, *durationFlag, url)
-	o := fortio.RunnerOptions{
+	url := flag.Arg(0)
+	prevGoMaxProcs := runtime.GOMAXPROCS(*goMaxProcsFlag)
+	fmt.Printf("Fortio running at %g queries per second, %d->%d procs, for %v: %s\n",
+		*qpsFlag, prevGoMaxProcs, runtime.GOMAXPROCS(0), *durationFlag, url)
+	ro := fortio.RunnerOptions{
 		QPS:         *qpsFlag,
-		Function:    test,
 		Duration:    *durationFlag,
 		NumThreads:  *numThreadsFlag,
-		Verbosity:   verbosity,
-		Percentiles: pList,
+		Percentiles: percList,
 		Resolution:  *resolutionFlag,
 	}
-	r := fortio.NewPeriodicRunner(&o)
-	numThreads := r.Options().NumThreads
-	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = numThreads + 1
-	// 1 Warm up / smoke test:  TODO: warm up all threads/connections
-	code, body := fortio.FetchURL(url)
-	if code != http.StatusOK {
-		fmt.Printf("Aborting because of error %d for %s\n%s\n", code, url, string(body))
+	var res fortio.HasRunnerResult
+	if *grpcFlag {
+		o := fortiogrpc.GRPCRunnerOptions{
+			RunnerOptions: ro,
+			Destination:   url,
+		}
+		res, err = fortiogrpc.RunGRPCTest(&o)
+	} else {
+		o := fortio.HTTPRunnerOptions{
+			RunnerOptions:     ro,
+			URL:               url,
+			HTTP10:            *http10Flag,
+			DisableFastClient: *stdClientFlag,
+			DisableKeepAlive:  !*keepAliveFlag,
+			Profiler:          *profileFlag,
+			Compression:       *compressionFlag,
+		}
+		res, err = fortio.RunHTTPTest(&o)
+	}
+	if err != nil {
+		fmt.Printf("Aborting because %v\n", err)
 		os.Exit(1)
 	}
-	if verbosity > 0 {
-		fmt.Printf("first hit of url %s: status %03d\n%s\n", url, code, string(body))
-	}
-
-	total := threadStats{
-		retCodes: make(map[int]int64),
-		sizes:    fortio.NewHistogram(0, 100),
-	}
-
-	stats = make([]threadStats, numThreads)
-	for i := 0; i < numThreads; i++ {
-		stats[i].sizes = total.sizes.Clone()
-		stats[i].retCodes = make(map[int]int64)
-	}
-	r.Run()
-	// Numthreads may have reduced
-	numThreads = r.Options().NumThreads
-	keys := []int{}
-	for i := 0; i < numThreads; i++ {
-		// Q: is there some copying each time stats[i] is used?
-		for k := range stats[i].retCodes {
-			if _, exists := total.retCodes[k]; !exists {
-				keys = append(keys, k)
-			}
-			total.retCodes[k] += stats[i].retCodes[k]
-		}
-		total.sizes.Transfer(stats[i].sizes)
-	}
-	sort.Ints(keys)
-	for _, k := range keys {
-		fmt.Printf("Code %3d : %d\n", k, total.retCodes[k])
-	}
-	if verbosity > 0 {
-		total.sizes.Print(os.Stdout, "Response Body Sizes Histogram", 50)
-	} else {
-		total.sizes.Counter.Print(os.Stdout, "Response Body Sizes")
-	}
+	fmt.Printf("All done %d calls (plus %d warmup) %.3f ms avg, %.1f qps\n",
+		res.Result().DurationHistogram.Count,
+		*numThreadsFlag,
+		1000.*res.Result().DurationHistogram.Avg(),
+		res.Result().ActualQPS)
 }

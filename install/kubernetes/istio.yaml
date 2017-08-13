@@ -59,8 +59,8 @@ spec:
         - name: config-volume
           mountPath: /etc/statsd
       - name: mixer
-        image: docker.io/istio/mixer:0.2.0-82070e1
-        imagePullPolicy: Always
+        image: gcr.io/istio-io/mixer:0.2.0
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 9091
         - containerPort: 9094
@@ -126,17 +126,29 @@ spec:
       serviceAccountName: istio-pilot-service-account
       containers:
       - name: discovery
-        image: gcr.io/istio-testing/pilot:06ee3635b2f10716abe3d59f625e0000649ccc59
-        imagePullPolicy: Always
+        image: gcr.io/istio-io/pilot:0.2.0
+        imagePullPolicy: IfNotPresent
         args: ["discovery", "-v", "2"]
         ports:
         - containerPort: 8080
         env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/istio/config
+      volumes:
+      - name: config-volume
+        configMap:
+          name: istio
 ---
 ################################
 # Istio ingress controller
@@ -179,18 +191,30 @@ spec:
       serviceAccountName: istio-ingress-service-account
       containers:
       - name: istio-ingress
-        image: gcr.io/istio-testing/proxy_debug:06ee3635b2f10716abe3d59f625e0000649ccc59
+        image: gcr.io/istio-io/proxy_debug:0.2.0
         args: ["proxy", "ingress", "-v", "2"]
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 80
         - containerPort: 443
         env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/istio/config
+      volumes:
+      - name: config-volume
+        configMap:
+          name: istio
 ---
 
 ################################
@@ -206,6 +230,11 @@ spec:
   selector:
     istio: egress
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: istio-egress-service-account
+---
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
@@ -217,16 +246,29 @@ spec:
       labels:
         istio: egress
     spec:
+      serviceAccountName: istio-egress-service-account
       containers:
       - name: proxy
-        image: gcr.io/istio-testing/proxy_debug:06ee3635b2f10716abe3d59f625e0000649ccc59
-        imagePullPolicy: Always
+        image: gcr.io/istio-io/proxy_debug:0.2.0
+        imagePullPolicy: IfNotPresent
         args: ["proxy", "egress", "-v", "2"]
         env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/istio/config
+      volumes:
+      - name: config-volume
+        configMap:
+          name: istio
 ---
 

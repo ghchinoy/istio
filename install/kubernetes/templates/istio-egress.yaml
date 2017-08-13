@@ -11,6 +11,11 @@ spec:
   selector:
     istio: egress
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: istio-egress-service-account
+---
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
@@ -22,16 +27,29 @@ spec:
       labels:
         istio: egress
     spec:
+      serviceAccountName: istio-egress-service-account
       containers:
       - name: proxy
         image: {PROXY_HUB}/proxy_debug:{PROXY_TAG}
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         args: ["proxy", "egress", "-v", "2"]
         env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: metadata.name
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/istio/config
+      volumes:
+      - name: config-volume
+        configMap:
+          name: istio
 ---
 
